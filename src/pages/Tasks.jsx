@@ -32,41 +32,61 @@ export default function Tasks() {
 
   useEffect(() => {
     fetchProjects();
-    // Fetch all members for managers to assign tasks
-    if (user?.role === ROLES.MANAGER || user?.role === ROLES.ADMIN) {
-      fetchTeamMembers();
+    // Preload members list for managers to ensure dropdown has users even before selecting a project
+    if (user?.role === ROLES.MANAGER) {
+      fetchAllMembers();
     }
   }, [user?.role]);
 
   useEffect(() => {
     if (selectedProject) {
       fetchTasks();
+      // Refresh team members for the selected project (manager view)
+      if (user?.role === ROLES.MANAGER) {
+        fetchProjectMembers(selectedProject);
+      }
     } else if (projects.length === 0) {
       // If no projects, set loading to false
       setLoading(false);
     }
-  }, [selectedProject, projects.length]);
+  }, [selectedProject, projects.length, user?.role]);
 
-  const fetchTeamMembers = async () => {
+  const fetchAllMembers = async () => {
     try {
-      // Get all members for task assignment (works without team)
       const response = await teamAPI.getAllMembers();
-      // Response already contains only MEMBER role users
-      setTeamMembers(response.data.members || []);
+      const membersOnly = (response.data.members || []).filter(
+        (member) => member.role === ROLES.MEMBER
+      );
+      setTeamMembers(membersOnly);
     } catch (error) {
-      console.error("Failed to fetch team members:", error);
-      // Fallback: try to get team members if user has a team
-      if (user?.teamId) {
-        try {
-          const fallbackResponse = await teamAPI.getMembers(user.teamId);
-          const membersOnly = (fallbackResponse.data.members || []).filter(
-            (member) => member.role === ROLES.MEMBER
-          );
-          setTeamMembers(membersOnly);
-        } catch (fallbackError) {
-          console.error("Failed to fetch team members (fallback):", fallbackError);
-        }
+      console.error("Failed to fetch members:", error);
+    }
+  };
+
+  const fetchProjectMembers = async (projectId) => {
+    if (!projectId) return;
+    const project = projects.find((p) => p._id === projectId);
+    if (!project) return;
+
+    const teamId =
+      typeof project.teamId === "object"
+        ? project.teamId._id || project.teamId.id
+        : project.teamId;
+
+    try {
+      // Prefer project-specific team members; fallback to all members if empty
+      const response = await teamAPI.getMembers(teamId);
+      let membersOnly = (response.data.members || []).filter(
+        (member) => member.role === ROLES.MEMBER
+      );
+      if (membersOnly.length === 0) {
+        await fetchAllMembers();
+        return;
       }
+      setTeamMembers(membersOnly);
+    } catch (error) {
+      console.error("Failed to fetch project members:", error);
+      await fetchAllMembers();
     }
   };
 
@@ -91,11 +111,12 @@ export default function Tasks() {
       let fetchedTasks = response.data?.tasks || [];
       
       // Filter tasks based on role:
-      // - MEMBER: Only see tasks assigned to them or unassigned tasks
+      // - MEMBER: Only see tasks assigned to them
       // - MANAGER/ADMIN: See all tasks
       if (user?.role === ROLES.MEMBER) {
         fetchedTasks = fetchedTasks.filter((task) => {
-          if (!task.assignedTo) return true; // Show unassigned tasks
+          // Members only see tasks assigned to them (not unassigned tasks)
+          if (!task.assignedTo) return false;
           const assignedToId = typeof task.assignedTo === "object" 
             ? (task.assignedTo.id || task.assignedTo._id)
             : task.assignedTo;
@@ -149,7 +170,8 @@ export default function Tasks() {
         const assignedToId = typeof newTaskData.assignedTo === "object" 
           ? (newTaskData.assignedTo.id || newTaskData.assignedTo._id)
           : newTaskData.assignedTo;
-        if (assignedToId === (user.id || user._id) || !newTaskData.assignedTo) {
+        // Members only see tasks assigned to them (not unassigned)
+        if (assignedToId === (user.id || user._id)) {
           setTasks([...tasks, newTaskData]);
         }
       } else {
@@ -188,7 +210,8 @@ export default function Tasks() {
               ? (updatedTask.assignedTo.id || updatedTask.assignedTo._id)
               : updatedTask.assignedTo)
           : null;
-        if (assignedToId === (user.id || user._id) || !assignedToId) {
+        // Members only see tasks assigned to them (not unassigned)
+        if (assignedToId === (user.id || user._id)) {
           setTasks(
             tasks.map((task) =>
               task._id === taskId ? updatedTask : task
@@ -229,6 +252,7 @@ export default function Tasks() {
     return tasks.filter((task) => task.status === status);
   };
 
+  const selectedProjectObj = projects.find((p) => p._id === selectedProject);
   const projectOptions = projects.map((p) => ({ value: p._id, label: p.name }));
   const statusOptions = Object.entries(STATUS_LABELS).map(([value, label]) => ({
     value,
@@ -236,7 +260,10 @@ export default function Tasks() {
   }));
   const memberOptions = [
     { value: "", label: "Unassigned" },
-    ...teamMembers.map((m) => ({ value: m.id || m._id, label: m.name })),
+    ...teamMembers.map((m) => ({
+      value: m.id || m._id,
+      label: `${m.name}${m.email ? ` (${m.email})` : ""}`,
+    })),
   ];
 
   // Only MANAGER can assign tasks (not ADMIN)
@@ -275,7 +302,7 @@ export default function Tasks() {
           )}
           {user?.role === "MEMBER" && (
             <p className="text-sm text-green-600 dark:text-green-400 mt-2">
-              ℹ️ As a Member, you can only see and update tasks assigned to you. You cannot create tasks.
+              ℹ️ As a Member, you can only see tasks assigned to you and update their status. You cannot create tasks.
             </p>
           )}
         </div>
@@ -296,6 +323,48 @@ export default function Tasks() {
           )}
         </div>
       </div>
+
+      {canAssignTasks && selectedProjectObj && (
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle className="text-lg">Team members for this project</CardTitle>
+                <p className="text-sm text-gray-600 dark:text-gray-400">
+                  You can assign tasks only to members of the project's team.
+                </p>
+              </div>
+              <Badge variant="secondary">{teamMembers.length} members</Badge>
+            </div>
+          </CardHeader>
+          <CardContent className="pt-0">
+            {teamMembers.length === 0 ? (
+              <p className="text-sm text-gray-500 dark:text-gray-400">
+                No members found for this project&apos;s team.
+              </p>
+            ) : (
+              <div className="flex flex-wrap gap-3">
+                {teamMembers.map((member) => (
+                  <div
+                    key={member._id || member.id}
+                    className="flex items-center gap-2 px-3 py-2 rounded-md bg-gray-50 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700"
+                  >
+                    <Avatar name={member.name} size="sm" />
+                    <div>
+                      <p className="text-sm text-gray-900 dark:text-gray-100">
+                        {member.name}
+                      </p>
+                      <p className="text-xs text-gray-500 dark:text-gray-400">
+                        {member.email}
+                      </p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       <DragDropContext onDragEnd={handleDragEnd}>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
